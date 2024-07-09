@@ -1,0 +1,777 @@
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+#ifndef ZILLIQA_SRC_LIBNODE_NODE_H_
+#define ZILLIQA_SRC_LIBNODE_NODE_H_
+
+#include <condition_variable>
+#include <deque>
+#include <list>
+#include <map>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+
+#include <boost/pool/pool_alloc.hpp>
+
+#include "common/TxnStatus.h"
+#include "libBlockchain/Block.h"
+#include "libConsensus/Consensus.h"
+#include "libData/AccountData/MBnForwardedTxnEntry.h"
+#include "libData/AccountData/Transaction.h"
+#include "libData/AccountData/TransactionReceipt.h"
+#include "libData/AccountData/TxnPool.h"
+#include "libLookup/Synchronizer.h"
+#include "libNetwork/DataSender.h"
+#include "libNetwork/Executable.h"
+#include "libNetwork/P2PMessage.h"
+#include "libPersistence/BlockStorage.h"
+
+class Mediator;
+class Retriever;
+
+typedef std::unordered_map<uint64_t, std::vector<std::pair<BlockHash, TxnHash>>>
+    UnavailableMicroBlockList;
+
+constexpr uint8_t DEFAULT_SHARD_ID = 1;
+
+/// Implements PoW submission and sharding node functionality.
+class Node : public Executable {
+  enum Action {
+    STARTPOW = 0x00,
+    PROCESS_DSBLOCK,
+    PROCESS_FINALBLOCK,
+    PROCESS_TXNBODY,
+    NUM_ACTIONS
+  };
+
+  enum SUBMITTRANSACTIONTYPE : unsigned char { MISSINGTXN = 0x01 };
+
+  enum REJOINTYPE : unsigned char {
+    ATFINALBLOCK = 0x00,
+    ATNEXTROUND = 0x01,
+    ATSTATEROOT = 0x02,
+    ATDSCONSENSUS = 0x03,     // For DS Rejoin
+    ATFINALCONSENSUS = 0x04,  // For DS Rejoin
+  };
+
+  enum LEGITIMACYRESULT : unsigned char {
+    SUCCESS = 0x00,
+    MISSEDTXN,
+    WRONGORDER,
+    SERIALIZATIONERROR,
+    DESERIALIZATIONERROR
+  };
+
+  struct GovProposalInfo {
+    GovProposalIdVotePair proposal;
+    uint64_t startDSEpoch;
+    uint64_t endDSEpoch;
+    int32_t remainingVoteCount;
+    bool isGovProposalActive{false};
+    GovProposalInfo()
+        : proposal({0, 0}),
+          startDSEpoch(0),
+          endDSEpoch(0),
+          remainingVoteCount(0) {}
+    void reset() {
+      proposal = std::make_pair(0, 0);
+      isGovProposalActive = false;
+      startDSEpoch = endDSEpoch = remainingVoteCount = 0;
+    }
+  };
+
+  Mediator& m_mediator;
+
+  Synchronizer m_synchronizer;
+
+  // DS block information
+  std::mutex m_mutexConsensus;
+
+  // Sharding information
+  std::atomic<uint32_t> m_numShards{};
+
+  // pre-generated addresses
+  std::vector<Address> m_populatedAddresses;
+  unsigned int m_accountPopulated = 0;
+
+  // Consensus variables
+  std::mutex m_mutexProcessConsensusMessage;
+  std::condition_variable cv_processConsensusMessage;
+  std::mutex m_MutexCVMicroblockConsensus;
+  std::mutex m_MutexCVMicroblockConsensusObject;
+  std::condition_variable cv_microblockConsensusObject;
+  std::atomic<uint16_t> m_consensusMyID{};
+  std::atomic<uint16_t> m_consensusLeaderID{};
+
+  std::mutex m_MutexCVFBWaitMB;
+  std::condition_variable cv_FBWaitMB;
+
+  /// DSBlock Timer Vars
+  std::mutex m_mutexCVWaitDSBlock;
+  std::condition_variable cv_waitDSBlock;
+
+  /// TxnPacket Timer Vars
+  std::mutex m_mutexCVTxnPacket;
+  std::condition_variable cv_txnPacket;
+  std::atomic<uint32_t> m_txnPacketThreadOnHold{0};
+
+  // Final Block Buffer for seed node
+  std::vector<zbytes> m_seedTxnBlksBuffer;
+  std::mutex m_mutexSeedTxnBlksBuffer;
+
+  // Persistence Retriever
+  std::shared_ptr<Retriever> m_retriever;
+
+  zbytes m_consensusBlockHash;
+  std::pair<uint64_t, CoSignatures> m_lastMicroBlockCoSig{0, CoSignatures()};
+
+  const static uint32_t RECVTXNDELAY_MILLISECONDS = 3000;
+  const static unsigned int GOSSIP_RATE = 48;
+
+  // Transactions information
+  mutable std::mutex m_mutexCreatedTransactions;
+  TxnPool m_createdTxns, t_createdTxns;
+
+  std::vector<TxnHash> m_expectedTranOrdering;
+  std::mutex m_mutexProcessedTransactions;
+  std::unordered_map<uint64_t,
+                     std::unordered_map<TxnHash, TransactionWithReceipt>>
+      m_processedTransactions;
+  std::unordered_map<TxnHash, TransactionWithReceipt> t_processedTransactions;
+  // operates under m_mutexProcessedTransaction
+  std::vector<TxnHash> m_TxnOrder;
+
+  uint64_t m_gasUsedTotal = 0;
+  uint128_t m_txnFees = 0;
+
+  // std::mutex m_mutexCommittedTransactions;
+  // std::unordered_map<uint64_t, std::list<TransactionWithReceipt>>
+  //     m_committedTransactions;
+  std::shared_timed_mutex mutable m_unconfirmedTxnsMutex;
+  HashCodeMap m_unconfirmedTxns;
+
+  std::mutex m_mutexMBnForwardedTxnBuffer;
+  std::unordered_map<uint64_t, std::vector<MBnForwardedTxnEntry>>
+      m_mbnForwardedTxnBuffer;
+
+  std::mutex m_mutexTxnPacketBuffer;
+  std::map<zbytes, zbytes> m_txnPacketBuffer;
+
+  std::mutex m_mutexTxnPktInProcess;
+  std::set<zbytes> m_txnPktInProcess;
+
+  // txn proc timeout related
+  std::mutex m_mutexCVTxnProcFinished;
+  std::condition_variable cv_TxnProcFinished;
+  bool m_txnProcessingFinished = false;
+
+  // soft confirmed transactions
+  std::mutex m_mutexSoftConfirmedTxns;
+  std::unordered_map<TxnHash, TransactionWithReceipt> m_softConfirmedTxns;
+
+  // pending transactions
+  std::mutex m_mutexPendingTxnListsThisEpoch;
+  std::set<zbytes> m_pendingTxnListsThisEpoch;
+
+  // pair of proposal id and vote value and vote duration in epoch
+  std::mutex m_mutexGovProposal;
+  GovProposalInfo m_govProposalInfo;
+
+  // Updating of ds guard var
+  std::atomic_bool m_requestedForDSGuardNetworkInfoUpdate = {false};
+
+  bool CheckState(Action action);
+
+  // To block certain types of incoming message for certain states
+  bool ToBlockMessage(unsigned char ins_byte);
+
+  // internal calls from ProcessStartPoW1
+  bool ReadVariablesFromStartPoWMessage(const zbytes& message,
+                                        unsigned int cur_offset,
+                                        uint64_t& block_num,
+                                        uint8_t& ds_difficulty,
+                                        uint8_t& difficulty,
+                                        std::array<unsigned char, 32>& rand1,
+                                        std::array<unsigned char, 32>& rand2);
+  bool ProcessSubmitMissingTxn(const zbytes& message, unsigned int offset,
+                               const Peer& from);
+
+  bool FindTxnInProcessedTxnsList(
+      const uint64_t& blockNum, uint8_t sharing_mode,
+      std::vector<TransactionWithReceipt>& txns_to_send,
+      const TxnHash& tx_hash);
+
+  bool ProcessStateDeltaFromFinalBlock(
+      const zbytes& stateDeltaBytes, const StateHash& finalBlockStateDeltaHash);
+
+  // internal calls from ProcessForwardTransaction
+  void CommitForwardedTransactions(const MBnForwardedTxnEntry& entry);
+
+  bool AddPendingTxn(HashCodeMap pendingTxns, const PubKey& pubkey,
+                     uint32_t shardId, const zbytes& txnListHash);
+
+  bool RemoveTxRootHashFromUnavailableMicroBlock(
+      const MBnForwardedTxnEntry& entry);
+
+  bool IsMicroBlockTxRootHashInFinalBlock(const MBnForwardedTxnEntry& entry,
+                                          bool& isEveryMicroBlockAvailable);
+
+  // void StoreMicroBlocks();
+  bool StoreFinalBlock(const TxBlock& txBlock);
+  void InitiatePoW();
+  void BeginNextConsensusRound();
+
+  void DeleteEntryFromFwdingAssgnAndMissingBodyCountMap(
+      const uint64_t& blocknum);
+
+  void ReinstateMemPool(
+      const std::map<Address, std::map<uint64_t, Transaction>>& addrNonceTxnMap,
+      const std::vector<Transaction>& gasLimitExceededTxnBuffer,
+      std::vector<std::pair<TxnHash, TxnStatus>,
+                  boost::pool_allocator<std::pair<TxnHash, TxnStatus>>>
+          droppedTxns);
+
+  // internal calls from ProcessVCDSBlocksMessage
+  void LogReceivedDSBlockDetails(const DSBlock& dsblock);
+  void StoreDSBlockToDisk(const DSBlock& dsblock);
+
+  // DS Guard network info update
+  void QueryLookupForDSGuardNetworkInfoUpdate();
+
+  // Message handlers
+  bool ProcessStartPoW(const zbytes& message, unsigned int offset,
+                       const Peer& from,
+                       [[gnu::unused]] const unsigned char& startByte,
+                       std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessSubmitTransaction(const zbytes& message, unsigned int offset,
+                                const Peer& from,
+                                [[gnu::unused]] const unsigned char& startByte,
+                                std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessMicroBlockConsensus(
+      const zbytes& message, unsigned int offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessVCFinalBlock(const zbytes& message, unsigned int offset,
+                           const Peer& from, const unsigned char& startByte,
+                           std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessVCFinalBlockCore(const zbytes& message, unsigned int offset,
+                               const Peer& from,
+                               [[gnu::unused]] const unsigned char& startByte,
+                               std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessFinalBlock(const zbytes& message, unsigned int offset,
+                         const Peer& from,
+                         [[gnu::unused]] const unsigned char& startByte,
+                         std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessFinalBlockCore(uint64_t& dsBlockNumber, uint32_t& consensusID,
+                             TxBlock& txBlock, zbytes& stateDelta);
+
+  void PopulateMicroblocks(std::vector<MicroBlockSharedPtr>& microblockPtrs,
+                           BlockHash const& hash,
+                           std::vector<Transaction>& txsToExecute);
+
+  bool ProcessMBnForwardTransaction(
+      const zbytes& message, unsigned int cur_offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessMBnForwardTransactionCore(const MBnForwardedTxnEntry& entry);
+
+  bool ProcessPendingTxn(const zbytes& message, unsigned int cur_offset,
+                         const Peer& from,
+                         [[gnu::unused]] const unsigned char& startByte,
+                         std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessTxnPacketFromLookup(
+      const zbytes& message, unsigned int offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessTxnPacketFromLookupCore(const zbytes& message,
+                                      const uint64_t& epochNum,
+                                      const uint64_t& dsBlockNum,
+                                      const uint32_t& shardId,
+                                      const PubKey& lookupPubKey,
+                                      const std::vector<Transaction>& txns);
+  bool ProcessProposeGasPrice(const zbytes& message, unsigned int offset,
+                              [[gnu::unused]] const Peer& from,
+                              [[gnu::unused]] const unsigned char& startByte,
+                              std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessDSGuardNetworkInfoUpdate(
+      const zbytes& message, unsigned int offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessNewShardNodeNetworkInfo(
+      const zbytes& message, unsigned int offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessGetVersion(const zbytes& message, unsigned int offset,
+                         const Peer& from,
+                         [[gnu::unused]] const unsigned char& startByte,
+                         std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessSetVersion(const zbytes& message, unsigned int offset,
+                         const Peer& from,
+                         [[gnu::unused]] const unsigned char& startByte,
+                         std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessVCDSBlocksMessage(const zbytes& message, unsigned int cur_offset,
+                                const Peer& from,
+                                [[gnu::unused]] const unsigned char& startByte,
+                                std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessDoRejoin(const zbytes& message, unsigned int offset,
+                       const Peer& from,
+                       [[gnu::unused]] const unsigned char& startByte,
+                       std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ProcessRemoveNodeFromBlacklist(
+      const zbytes& message, unsigned int offset, const Peer& from,
+      [[gnu::unused]] const unsigned char& startByte,
+      std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool NoOp(const zbytes& message, unsigned int offset, const Peer& from,
+            [[gnu::unused]] const unsigned char& startByte,
+            std::shared_ptr<zil::p2p::P2PServerConnection>);
+
+  bool ComposeMBnForwardTxnMessageForSender(zbytes& mb_txns_message);
+
+  bool VerifyDSBlockCoSignature(const DSBlock& dsblock);
+  bool VerifyFinalBlockCoSignature(const TxBlock& txblock);
+  bool CheckStateRoot(const TxBlock& finalBlock);
+
+  // View change
+
+  bool VerifyVCBlockCoSignature(const VCBlock& vcblock);
+  bool ProcessVCBlock(const zbytes& message, unsigned int cur_offset,
+                      const Peer& from,
+                      [[gnu::unused]] const unsigned char& startByte,
+                      std::shared_ptr<zil::p2p::P2PServerConnection>);
+  bool ProcessVCBlockCore(const VCBlock& vcblock);
+  // Transaction functions
+  bool OnCommitFailure(const std::map<unsigned int, zbytes>&);
+
+  bool MicroBlockValidator(const zbytes& message, unsigned int offset,
+                           zbytes& errorMsg, const uint32_t consensusID,
+                           const uint64_t blockNumber, const zbytes& blockHash,
+                           const uint16_t leaderID, const PubKey& leaderKey,
+                           zbytes& messageToCosign);
+  unsigned char CheckLegitimacyOfTxnHashes(zbytes& errorMsg);
+  bool CheckMicroBlockVersion();
+  bool CheckMicroBlockshardId();
+  bool CheckMicroBlockTimestamp();
+  bool CheckMicroBlockGasLimit(const uint64_t& microblock_gas_limit);
+  bool CheckMicroBlockHashes(zbytes& errorMsg);
+  bool CheckMicroBlockTxnRootHash();
+  bool CheckMicroBlockStateDeltaHash();
+  bool CheckMicroBlockTranReceiptHash();
+
+  void NotifyTimeout(bool& txnProcTimeout);
+  bool VerifyTxnsOrdering(const std::vector<TxnHash>& tranHashes,
+                          std::vector<TxnHash>& missingtranHashes);
+
+  void SetLastKnownGoodState();
+
+  // Is Running from New Process
+  bool m_fromNewProcess = true;
+
+  bool m_doRejoinAtNextRound = false;
+  bool m_doRejoinAtStateRoot = false;
+  bool m_doRejoinAtFinalBlock = false;
+
+  void ResetRejoinFlags();
+
+  void SendDSBlockToOtherShardNodes(const zbytes& dsblock_message);
+  void SendVCBlockToOtherShardNodes(const zbytes& vcblock_message);
+  void SendBlockToOtherShardNodes(const zbytes& message, uint32_t cluster_size,
+                                  uint32_t num_of_child_clusters);
+  void GetNodesToBroadCastUsingTreeBasedClustering(
+      uint32_t cluster_size, uint32_t num_of_child_clusters, uint32_t& nodes_lo,
+      uint32_t& nodes_hi);
+
+  void GetIpMapping(std::unordered_map<std::string, Peer>& ipMapping);
+
+  void WakeupAtTxEpoch();
+
+  /// Set initial state, variables, and clean-up storage
+  void Init();
+
+  /// Initilize the add genesis block and account
+  void AddGenesisInfo(SyncType syncType);
+
+  void SoftConfirmForwardedTransactions(const MBnForwardedTxnEntry& entry);
+
+  void ClearSoftConfirmedTransactions();
+  void UpdateGovProposalRemainingVoteInfo();
+  bool CheckIfGovProposalActive();
+
+  void SendTxnMemPoolToNextLayer();
+
+ public:
+  enum NodeState : unsigned char {
+    POW_SUBMISSION = 0x00,
+    WAITING_DSBLOCK,
+    WAITING_FINALBLOCK,
+    SYNC
+  };
+
+  enum RECEIVERTYPE : unsigned char { LOOKUP = 0x00, PEER, BOTH };
+
+  // Proposed gas price
+  uint128_t m_proposedGasPrice;
+  std::mutex m_mutexGasPrice;
+
+  // This process is newly invoked by shell from late node join script
+  bool m_runFromLate = false;
+
+  std::mutex m_mutexShardMember;
+  std::shared_ptr<DequeOfNode> m_myShardMembers;
+
+  std::mutex m_mutexPrePrepMissingTxnhashes;
+  std::vector<TxnHash> m_prePrepMissingTxnhashes;
+
+  std::shared_ptr<MicroBlock> m_microblock;
+  // used only by leader
+  std::shared_ptr<MicroBlock> m_prePrepMicroblock;
+
+  bool m_completeMicroBlockReady = false;
+  std::condition_variable m_cvCompleteMicroBlockReady;
+
+  // used only by backup
+  bool m_prePrepRunning = false;
+
+  std::mutex m_mutexCVMicroBlockMissingTxn;
+  std::condition_variable cv_MicroBlockMissingTxn;
+
+  std::mutex m_mutexIsEveryMicroBlockAvailable;
+
+  // Transaction body sharing variables
+  std::mutex m_mutexUnavailableMicroBlocks;
+  UnavailableMicroBlockList m_unavailableMicroBlocks;
+
+  /// Sharding variables
+  const uint32_t m_myshardId = DEFAULT_SHARD_ID;
+  std::atomic<bool> m_isPrimary{};
+  std::shared_ptr<ConsensusCommon> m_consensusObject;
+
+  // Microblock processing
+  std::mutex m_mutexMicroBlock;
+
+  // Finalblock Processing
+  std::mutex m_mutexFinalBlock;
+
+  // VCFinalblock Processing
+  std::mutex m_mutexVCFinalBlock;
+
+  // DS block information
+  std::mutex m_mutexDSBlock;
+
+  // VC block information
+  std::mutex m_mutexVCBlock;
+
+  /// The current internal state of this Node instance.
+  std::atomic<NodeState> m_state{};
+
+  // a buffer flag used by lookup to store the isVacuousEpoch state before
+  // StoreFinalBlock
+  std::atomic<bool> m_isVacuousEpochBuffer{};
+
+  // an indicator that whether the non-sync node is still doing mining
+  // at standard difficulty
+  std::atomic<bool> m_stillMiningPrimary{};
+
+  // Is part of current sharding structure / dsCommittee
+  std::atomic<bool> m_confirmedNotInNetwork{};
+
+  // hold count of whitelist request for given ip
+  std::mutex m_mutexWhitelistReqs;
+  std::map<uint128_t, uint32_t> m_whitelistReqs;
+
+  // store VCBlocks if any of latest tx block
+  std::mutex m_mutexvcBlocksStore;
+  std::vector<VCBlock> m_vcBlockStore;
+
+  // store VCDSBlocks
+  std::mutex m_mutexVCDSBlockStore;
+  std::map<uint64_t, zbytes> m_vcDSBlockStore;
+
+  // store VCFinalBlocks
+  std::mutex m_mutexVCFinalBlockStore;
+  std::map<uint64_t, zbytes> m_vcFinalBlockStore;
+
+  // store MBNFORWARDTRANSACTION
+  std::mutex m_mutexMBnForwardedTxnStore;
+  std::map<uint64_t, std::map<uint32_t, zbytes>> m_mbnForwardedTxnStore;
+
+  // stores historical map of vcblocks to txblocknum
+  std::mutex m_mutexhistVCBlkForTxBlock;
+  std::map<uint64_t, std::vector<VCBlockSharedPtr>> m_histVCBlocksForTxBlock;
+
+  // stores historical map of vcblocks to dsblocknum
+  std::mutex m_mutexhistVCBlkForDSBlock;
+  std::map<uint64_t, std::vector<VCBlockSharedPtr>> m_histVCBlocksForDSBlock;
+
+  // whether txns dist window open
+  std::atomic<bool> m_txn_distribute_window_open{};
+
+  // stores map of shardnodepubkey and n/w info change request count (for
+  // current dsepoch only)
+  std::mutex m_mutexIPChangeRequestStore;
+  std::map<PubKey, uint32_t> m_ipChangeRequestStore;
+
+  std::atomic<bool> m_versionChecked{false};
+
+  // stores pending TXns that seedpubs with ARCHIVAL_LOOKUP_WITH_TX_TRACES keep
+  mutable std::mutex m_mutexPending;
+  std::map<TxnHash, Transaction> m_pendingTxns;
+
+  /// Constructor. Requires mediator reference to access DirectoryService and
+  /// other global members.
+  Node(Mediator& mediator, unsigned int syncType, bool toRetrieveHistory,
+       const std::string& nodeIdentity);
+
+  /// Destructor.
+  ~Node();
+
+  /// Install the Node
+  bool Install(const SyncType syncType, const bool toRetrieveHistory = true,
+               bool rejoiningAfterRecover = false);
+
+  // Reset certain variables to the initial state
+  bool CleanVariables();
+
+  /// Prepare for processing protocols after initialization
+  void Prepare(bool runInitializeGenesisBlocks);
+
+  /// Get number of shards
+  uint32_t getNumShards() { return m_numShards; };
+
+  /// Get this node shard ID
+  uint32_t GetShardId() { return m_myshardId; };
+
+  /// Recalculate this node shardID and if IP was changed
+  bool RecalculateMyShardId(bool& ipChanged);
+
+  // Send whitelist message to peers and seeds
+  bool ComposeAndSendRemoveNodeFromBlacklist(
+      const RECEIVERTYPE receiver = BOTH);
+
+  /// Sets the value of m_state.
+  void SetState(NodeState state);
+
+  /// Implements the Execute function inherited from Executable.
+  bool Execute(const zbytes& message, unsigned int offset, const Peer& from,
+               const unsigned char& startByte = zil::p2p::START_BYTE_NORMAL,
+               std::shared_ptr<zil::p2p::P2PServerConnection> = nullptr);
+
+  Mediator& GetMediator() { return m_mediator; }
+
+  /// Download peristence from incremental db
+  bool DownloadPersistenceFromS3();
+
+  /// Recover the previous state by retrieving persistence data
+  bool StartRetrieveHistory(const SyncType syncType, bool& allowRecoverAllSync,
+                            bool rejoiningAfterRecover = false);
+
+  bool CheckIntegrity(const bool fromValidateDBBinary = false);
+  void PutAllTxnsInUnconfirmedTxns();
+
+  bool SendPendingTxnToLookup();
+
+  bool ValidateDB();
+
+  /// Add new block into tx blockchain
+  void AddBlock(const TxBlock& block);
+
+  void UpdateDSCommitteeComposition(DequeOfNode& dsComm, const DSBlock& dsblock,
+                                    const bool showLogs = true);
+  void UpdateDSCommitteeComposition(DequeOfNode& dsComm, const DSBlock& dsblock,
+                                    MinerInfoDSComm& minerInfo);
+
+  void CommitMBnForwardedTransactionBuffer();
+
+  void CleanCreatedTransaction();
+
+  void CleanMBConsensusAndTxnBuffers();
+
+  void AddBalanceToGenesisAccount();
+
+  void PopulateAccounts();
+
+  void UpdateBalanceForPreGeneratedAccounts();
+
+  void CallActOnFinalblock();
+
+  // Used by leader before sending 'collective sig + newannouncement'
+  bool WaitUntilCompleteMicroBlockIsReady();
+  // Used by backup before processing 'collective sig + newannouncement'
+  bool WaitUntilTxnProcessingDone();
+
+  void StartTxnProcessingThread();
+  void ProcessTransactionWhenShardLeader(const uint64_t& microblock_gas_limit);
+  void ProcessTransactionWhenShardBackup(const uint64_t& microblock_gas_limit);
+  bool ComposePrePrepMicroBlock(const uint64_t& microblock_gas_limit);
+  bool ComposeMicroBlock(const uint64_t& microblock_gas_limit);
+  bool CheckMicroBlockValidity(zbytes& errorMsg,
+                               const uint64_t& microblock_gas_limit);
+
+  bool OnNodeMissingTxns(const zbytes& errorMsg, const unsigned int offset,
+                         const Peer& from);
+
+  void UpdateStateForNextConsensusRound();
+
+  // Start synchronization with lookup as a shard node
+  void StartSynchronization();
+
+  /// Performs PoW mining and submission for DirectoryService committee
+  /// membership.
+  bool StartPoW(const uint64_t& block_num, uint8_t ds_difficulty,
+                uint8_t difficulty,
+                const std::array<unsigned char, UINT256_SIZE>& rand1,
+                const std::array<unsigned char, UINT256_SIZE>& rand2,
+                const uint32_t lookupId = uint32_t() - 1);
+
+  /// Send PoW soln to DS Committee
+  bool SendPoWResultToDSComm(const uint64_t& block_num,
+                             const uint8_t& difficultyLevel,
+                             const uint64_t winningNonce,
+                             const std::string& powResultHash,
+                             const std::string& powMixhash,
+                             const zbytes& extraData, const uint32_t& lookupId,
+                             const uint128_t& gasPrice);
+
+  /// Used by oldest DS node to finish setup as a new shard node
+  /// And also used by shard node rejoining back
+  void StartFirstTxEpoch(bool fbWaitState = false);
+
+  /// Used for commit buffered txn packet
+  void CommitTxnPacketBuffer(bool ignorePktForPrevEpoch = false);
+
+  /// Used by oldest DS node to configure sharding variables as a new shard node
+  bool LoadShardingStructure(bool callByRetrieve = false);
+
+  // Rejoin the network as a shard node in case of failure happens in protocol
+  void RejoinAsNormal();
+
+  /// Force state changes from MBCON/MBCON_PREP -> WAITING_FINALBLOCK
+  void PrepareGoodStateForFinalBlock();
+
+  /// Reset Consensus ID
+  void ResetConsensusId();
+
+  // Set m_consensusMyID
+  void SetConsensusMyID(uint16_t);
+
+  // Get m_consensusMyID
+  uint16_t GetConsensusMyID() const;
+
+  // Set m_consensusLeaderID
+  void SetConsensusLeaderID(uint16_t);
+
+  // Get m_consensusLeaderID
+  uint16_t GetConsensusLeaderID() const;
+
+  /// Fetch offline lookups with a counter for retrying
+  bool GetOfflineLookups(bool endless = false);
+
+  /// Fetch latest ds block with a counter for retrying
+  bool GetLatestDSBlock();
+
+  void UpdateDSCommitteeCompositionAfterVC(const VCBlock& vcblock,
+                                           DequeOfNode& dsComm);
+  void UpdateRetrieveDSCommitteeCompositionAfterVC(const VCBlock& vcblock,
+                                                   DequeOfNode& dsComm,
+                                                   const bool showLogs = true);
+
+  void UpdateProcessedTransactions();
+
+  bool IsShardNode(const PubKey& pubKey);
+  bool IsShardNode(const Peer& peerInfo);
+
+  TxnStatus IsTxnInMemPool(const TxnHash& txhash) const;
+
+  std::unordered_map<TxnHash, TxnStatus> GetUnconfirmedTxns() const;
+
+  uint32_t CalculateShardLeaderFromDequeOfNode(uint16_t lastBlockHash,
+                                               uint32_t sizeOfShard,
+                                               const DequeOfNode& shardMembers);
+  static bool GetDSLeader(const BlockLink& lastBlockLink,
+                          const DSBlock& latestDSBlock,
+                          const DequeOfNode& dsCommittee, PairOfNode& dsLeader);
+
+  // Get entire network peer info
+  void GetEntireNetworkPeerInfo(VectorOfNode& peers,
+                                std::vector<PubKey>& pubKeys);
+
+  std::string GetStateString() const;
+
+  bool LoadUnavailableMicroBlockHashes(const TxBlock& finalBlock,
+                                       bool& toSendTxnToLookup,
+                                       bool skipShardIDCheck = false);
+
+  UnavailableMicroBlockList& GetUnavailableMicroBlocks();
+
+  void CleanUnavailableMicroBlocks();
+
+  bool WhitelistReqsValidator(const uint128_t& ipAddress);
+
+  void CleanWhitelistReqs();
+
+  void ClearUnconfirmedTxn();
+
+  bool IsUnconfirmedTxnEmpty() const;
+
+  void RemoveIpMapping();
+
+  void CleanLocalRawStores();
+
+  bool GetSoftConfirmedTransaction(const TxnHash& txnHash,
+                                   TxBodySharedPtr& tptr);
+
+  void WaitForNextTwoBlocksBeforeRejoin();
+
+  bool UpdateShardNodeIdentity();
+
+  bool ValidateAndUpdateIPChangeRequestStore(const PubKey& shardNodePubkey);
+
+  bool StoreVoteUntilPow(const std::string& proposalId,
+                         const std::string& voteValue,
+                         const std::string& remainingVoteCount,
+                         const std::string& startDSEpoch,
+                         const std::string& endDSEpoch);
+
+  void CheckPeers(const std::vector<Peer>& peers);
+
+  std::vector<Transaction> GetCreatedTxns() const;
+  std::vector<Transaction> GetPendingTxns() const;
+  void AddPendingTxn(Transaction const& tx);
+
+ private:
+  static std::map<NodeState, std::string> NodeStateStrings;
+
+  static std::map<Action, std::string> ActionStrings;
+  std::string GetActionString(Action action) const;
+
+  void PutTxnsInTempDataBase(
+      const std::unordered_map<TxnHash, TransactionWithReceipt>&
+          processedTransactions);
+
+  void SaveTxnsToS3(const std::unordered_map<TxnHash, TransactionWithReceipt>&
+                        processedTransactions);
+
+  std::string GetAwsS3CpString(const std::string& uploadFilePath);
+  std::string m_nodeIdentity;
+};
+
+#endif  // ZILLIQA_SRC_LIBNODE_NODE_H_

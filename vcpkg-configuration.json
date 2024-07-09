@@ -1,0 +1,15 @@
+{
+  "registries": [
+    {
+      "kind": "filesystem",
+      "path": "vcpkg-registry",
+      "packages": [
+        "g3log",
+        "g3sinks",
+        "schnorr",
+        "cryptoutils",
+        "opentelemetry-cpp"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+diff --git a/exporters/ostream/CMakeLists.txt b/exporters/ostream/CMakeLists.txt
+index a674de84..5518adf7 100644
+--- a/exporters/ostream/CMakeLists.txt
++++ b/exporters/ostream/CMakeLists.txt
+@@ -46,7 +46,7 @@ target_include_directories(
+   opentelemetry_exporter_ostream_metrics
+   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>")
+ target_link_libraries(opentelemetry_exporter_ostream_metrics
+-                      PUBLIC opentelemetry_metrics)
++                      PUBLIC opentelemetry_metrics opentelemetry_resources)
+ 
+ if(OPENTELEMETRY_INSTALL)
+   install(
+diff --git a/exporters/otlp/CMakeLists.txt b/exporters/otlp/CMakeLists.txt
+index 585e2539..7f5ec0c7 100644
+--- a/exporters/otlp/CMakeLists.txt
++++ b/exporters/otlp/CMakeLists.txt
+@@ -33,7 +33,7 @@ if(WITH_OTLP_GRPC)
+                         PROPERTIES EXPORT_NAME otlp_grpc_client)
+   target_link_libraries(
+     opentelemetry_exporter_otlp_grpc_client
+-    PUBLIC opentelemetry_sdk opentelemetry_ext opentelemetry_proto)
++    PUBLIC opentelemetry_common opentelemetry_ext opentelemetry_proto)
+ 
+   target_link_libraries(opentelemetry_exporter_otlp_grpc_client
+                         PRIVATE gRPC::grpc++)
+@@ -61,7 +61,8 @@ if(WITH_OTLP_GRPC)
+   target_link_libraries(
+     opentelemetry_exporter_otlp_grpc
+     PUBLIC opentelemetry_otlp_recordable
+-           opentelemetry_exporter_otlp_grpc_client)
++           opentelemetry_exporter_otlp_grpc_client
++    PRIVATE gRPC::grpc++)
+ 
+   list(APPEND OPENTELEMETRY_OTLP_TARGETS opentelemetry_exporter_otlp_grpc)
+ 
+@@ -76,7 +77,8 @@ if(WITH_OTLP_GRPC)
+   target_link_libraries(
+     opentelemetry_exporter_otlp_grpc_log
+     PUBLIC opentelemetry_otlp_recordable
+-           opentelemetry_exporter_otlp_grpc_client)
++           opentelemetry_exporter_otlp_grpc_client
++    PRIVATE gRPC::grpc++)
+ 
+   list(APPEND OPENTELEMETRY_OTLP_TARGETS opentelemetry_exporter_otlp_grpc_log)
+ 
+@@ -90,7 +92,8 @@ if(WITH_OTLP_GRPC)
+   target_link_libraries(
+     opentelemetry_exporter_otlp_grpc_metrics
+     PUBLIC opentelemetry_otlp_recordable
+-           opentelemetry_exporter_otlp_grpc_client)
++           opentelemetry_exporter_otlp_grpc_client
++    PRIVATE gRPC::grpc++)
+ 
+   list(APPEND OPENTELEMETRY_OTLP_TARGETS
+        opentelemetry_exporter_otlp_grpc_metrics)
+@@ -102,7 +105,7 @@ if(WITH_OTLP_HTTP)
+                         PROPERTIES EXPORT_NAME otlp_http_client)
+   target_link_libraries(
+     opentelemetry_exporter_otlp_http_client
+-    PUBLIC opentelemetry_sdk opentelemetry_proto opentelemetry_http_client_curl
++    PUBLIC opentelemetry_common opentelemetry_proto opentelemetry_http_client_curl
+            nlohmann_json::nlohmann_json)
+   if(nlohmann_json_clone)
+     add_dependencies(opentelemetry_exporter_otlp_http_client
+@@ -141,7 +144,8 @@ if(WITH_OTLP_HTTP)
+     target_link_libraries(
+       opentelemetry_exporter_otlp_http_log
+       PUBLIC opentelemetry_otlp_recordable
+-             opentelemetry_exporter_otlp_http_client)
++             opentelemetry_exporter_otlp_http_client
++      PRIVATE gRPC::grpc++)
+ 
+     list(APPEND OPENTELEMETRY_OTLP_TARGETS opentelemetry_exporter_otlp_http_log)
+ 
+diff --git a/ext/src/http/client/curl/CMakeLists.txt b/ext/src/http/client/curl/CMakeLists.txt
+index 6684c5f8..5a208cb2 100644
+--- a/ext/src/http/client/curl/CMakeLists.txt
++++ b/ext/src/http/client/curl/CMakeLists.txt
+@@ -11,14 +11,14 @@ set_target_properties(opentelemetry_http_client_curl
+ if(TARGET CURL::libcurl)
+   target_link_libraries(
+     opentelemetry_http_client_curl
+-    PUBLIC opentelemetry_ext
++    PUBLIC opentelemetry_ext opentelemetry_common
+     PRIVATE CURL::libcurl)
+ else()
+   target_include_directories(opentelemetry_http_client_curl
+                              INTERFACE "${CURL_INCLUDE_DIRS}")
+   target_link_libraries(
+     opentelemetry_http_client_curl
+-    PUBLIC opentelemetry_ext
++    PUBLIC opentelemetry_ext opentelemetry_common
+     PRIVATE ${CURL_LIBRARIES})
+ endif()
+ 
