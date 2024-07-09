@@ -18,33 +18,33 @@ message(STATUS "We are on a ${CMAKE_SYSTEM_NAME} system")
 # Workaround: there's a bug related to protobuf 3.9.1 on vcpkg when compiled with
 #             x64-osx-dynamic (see https://github.com/microsoft/vcpkg/issues/8421).
 #             This is a simple workaround against this issue.
-if (APPLE)
-    file(CREATE_LINK
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib
-        ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/tools/lib
-        SYMBOLIC)
-endif ()
+# if (APPLE)
+#     file(CREATE_LINK
+#         ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib
+#         ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/tools/lib
+#         SYMBOLIC)
+# endif ()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 #
 # check dependencies
 #
-find_package(jsoncpp CONFIG REQUIRED)
-find_package(mongocxx CONFIG REQUIRED)
-find_package(bsoncxx CONFIG REQUIRED)
-find_package(leveldb CONFIG REQUIRED)
-find_package(g3log REQUIRED)
-find_package(g3sinks REQUIRED)
+# find_package(jsoncpp CONFIG REQUIRED)
+# find_package(mongocxx CONFIG REQUIRED)
+# find_package(bsoncxx CONFIG REQUIRED)
+# find_package(leveldb CONFIG REQUIRED)
+# find_package(g3log REQUIRED)
+# find_package(g3sinks REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(protobuf CONFIG REQUIRED)
+# find_package(protobuf CONFIG REQUIRED)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 find_package(Boost COMPONENTS system unit_test_framework program_options REQUIRED)
 
-find_package(Schnorr REQUIRED)
-find_package(CryptoUtils REQUIRED)
+# find_package(Schnorr REQUIRED)
+# find_package(CryptoUtils REQUIRED)
 
 include_directories(${SCHNORR_INCLUDE_DIR}/include)
 include_directories(${OPENSSL_INCLUDE_DIR})

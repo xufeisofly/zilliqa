@@ -174,14 +174,15 @@ jobs=$((n_parallel - 1))
 
 echo building using $jobs jobs
 
-cmake -H. -B"${build_dir}" ${CMAKE_EXTRA_OPTIONS}  -DCMAKE_BUILD_TYPE=${build_type} -DCMAKE_INSTALL_PREFIX="${install_dir}" -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}"/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${VCPKG_TRIPLET}
-cmake --build "${build_dir}" --config ${build_type} -j $jobs
+cmake -H. -B"${build_dir}" ${CMAKE_EXTRA_OPTIONS}  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX="${install_dir}" -DVCPKG_TARGET_TRIPLET=${VCPKG_TRIPLET} -DCMAKE_EXPORT_COMPILE_COMMANDS=1
+# -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}"/scripts/buildsystems/vcpkg.cmake
+# cmake --build "${build_dir}" --config ${build_type} -j $jobs
 
-if command -v ccache &> /dev/null; then
-  echo "ccache status"
-  ccache -s
-fi
+# if command -v ccache &> /dev/null; then
+#   echo "ccache status"
+#   ccache -s
+# fi
 
-if [ ${run_clang_tidy_fix} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target clang-tidy-fix; fi
-if [ ${run_clang_format_fix} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target clang-format-fix; fi
-if [ ${run_code_coverage} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target Zilliqa_coverage; fi
+# if [ ${run_clang_tidy_fix} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target clang-tidy-fix; fi
+# if [ ${run_clang_format_fix} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target clang-format-fix; fi
+# if [ ${run_code_coverage} -ne 0 ]; then cmake --build "${build_dir}" --config ${build_type} --target Zilliqa_coverage; fi

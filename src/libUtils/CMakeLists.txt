@@ -1,8 +1,8 @@
 find_package(CURL REQUIRED)
-find_package(protobuf CONFIG REQUIRED)
+# find_package(protobuf CONFIG REQUIRED)
 
 
-protobuf_generate_cpp(PROTO_SRC PROTO_HEADER Evm.proto)
+# protobuf_generate_cpp(PROTO_SRC PROTO_HEADER Evm.proto)
 
 add_library(Utils
         BitVector.cpp
@@ -30,8 +30,6 @@ target_link_libraries(Utils
         Constants
         MessageSWInfo
         jsonrpc
-        $<IF:$<TARGET_EXISTS:jsoncpp_lib_static>,jsoncpp_lib_static,jsoncpp_lib>
-        protobuf::libprotobuf
         PRIVATE
         Metrics
         ${CryptoUtils_LIBRARY}
